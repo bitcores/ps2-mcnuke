@@ -60,6 +60,10 @@ GS_PMODE		equ 0x1200_0000
 GS_DISPFB1		equ 0x1200_0070
 GS_DISPLAY1		equ 0x1200_0080
 _SetGsCrt		equ 2
+_AddIntcHandler	equ 16
+_RemoveIntcHandler equ 17
+__EnableIntc	equ 20
+__DisableIntc	equ 21
 _GsPutIMR		equ 113	
 FMT_PSMCT16		equ 0x02
 DIR_UL_LR		equ 0
@@ -67,6 +71,7 @@ XDIR_HOST_TO_LOCAL equ 0
 FLG_PACKED		equ 0
 FLG_IMAGE		equ 2
 PRIM_SPRITE		equ 6
+INTC_TIM1		equ 10
 
 REG_PRIM		equ 0x00
 REG_RGBAQ		equ 0x01
@@ -86,6 +91,9 @@ REG_TRXPOS		equ 0x51
 REG_TRXREG		equ 0x52
 REG_TRXDIR		equ 0x53
 
+T1_COUNT		equ 0x1000_0800
+T1_MODE			equ 0x1000_0810
+T1_COMP			equ 0x1000_0820
 D2_CHCR			equ 0x1000_A000
 D_CTRL			equ 0x1000_E000
 D_ENABLEW		equ 0x1000_F590
@@ -168,9 +176,13 @@ main:
     or $v0, $v0, $at
     sd $v0, ($v1)
 
+	jal Install_Tdiv_handler
+	nop
 	jal clear_screen
     nop
 	jal vsync_wait
+	nop
+	jal Enable_Tdiv_interrupt
 	nop
 
 ;; gotta make sure cache pointer list is zero
@@ -197,13 +209,11 @@ Wipe_MC_loop:
 	nop
 	jal Memorycard_erase
 	nop
-	jal vsync_wait
 	addi $s3, $s3, 0x10
 	slt $s2, $s3, $s4
 	bne $s2, $zero, Wipe_MC_loop
 	nop
 	
-
 	jal vsync_wait
 	nop
 	jal vsync_wait
@@ -487,6 +497,14 @@ Memorycard_erase:
 	li $s0, mccmd
 	jal Memorycard_comm
 	lbu $s1, 0($s0)
+;; after the erase+flush is done, need to wait some time
+	li $s0, tdiv_counter
+	ori $s1, $zero, 0x40
+	sh $s1, ($s0)
+Memorycard_erase_wait_loop:	
+	slt $s2, $s1, $zero
+	beq $s2, $zero, Memorycard_erase_wait_loop
+	lh $s1, ($s0)	
 	ld $ra, 0($sp)
 	ld $s0, 8($sp)
 	ld $s1, 16($sp)
@@ -793,6 +811,82 @@ DMA_waitloop:
 	jr $ra
     addi $sp, $sp, 8
 
+Install_Tdiv_handler:
+    di	
+    ;; Add the DIV timer handler
+	;; this is a custom timer interrupt
+    li $v1, _AddIntcHandler
+    li $a0, INTC_TIM1
+    li $a1, Tdiv_handler
+    li $a2, 0
+    syscall
+    nop
+    ei
+    jr $ra
+    nop
+Enable_Tdiv_interrupt:
+	di
+	;; set up how we are doing the DIV interrupt
+	li $v1, T1_COUNT
+	sw $zero, ($v1)		; make sure the timer is clear
+	li $v1, T1_COMP
+	li $a0, 35			; every 35 ticks, hit it
+	sw $a0, ($v1)		; set compare to 35
+    ;; Enable DIV interrupt
+    li $v1, __EnableIntc
+    li $a0, INTC_TIM1
+    syscall
+    nop
+	li $v1, T1_MODE		; clock / 256 mode
+	li $a0, 0x0182		; enable the timer
+	sw $a0, ($v1)
+	ei
+	jr $ra
+	nop
+Disable_Tdiv_interrupt:
+	di
+	;; set up how we are doing the DIV interrupt
+	;; Disable DIV interrupt
+    li $v1, __DisableIntc
+    li $a0, INTC_TIM1
+    syscall
+    nop
+	li $v1, T1_MODE
+	li $a0, 0x0502		; disable the timer, ensure interrupt clear
+	li $v1, T1_COUNT
+	sw $zero, ($v1)		; make sure the timer is clear
+	li $v1, T1_COMP
+	li $a0, 35			; every 35 ticks
+	sw $a0, ($v1)		; set compare to 35
+	ei
+	jr $ra
+	nop
+.align 32
+tdiv_counter:
+	dc32 0
+.align 32
+Tdiv_handler:
+	addi $sp, $sp, -24
+	sd $s0, 0($sp)
+	sd $s1, 8($sp)
+	sd $s2, 16($sp)
+
+	li $s0, tdiv_counter
+	lh $s1, ($s0)
+	addi $s1, $s1, -1
+	sh $s1, ($s0)
+
+	li $s1, T1_COUNT
+	sw $zero, ($s1)		; make sure the timer is clear
+	li $s1, T1_MODE
+	li $s0, 0x0582		; clear the interrupt
+	sw $s0, ($s1)
+	
+	ld $s0, 0($sp)
+	ld $s1, 8($sp)
+	ld $s2, 16($sp)
+	jr $ra
+    addi $sp, $sp, 24
 
 .align 128
 memorycard_getspecs:
